@@ -1,0 +1,2 @@
+# binance_downloader
+Binanceのヒストリカルデータを簡単にダウンロードするためのユーティリティ
