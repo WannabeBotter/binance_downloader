@@ -3,7 +3,9 @@ import datetime
 import gc
 import hashlib
 import hmac
+import io
 import os
+import pathlib
 import tarfile
 import time
 from io import BytesIO
@@ -15,13 +17,12 @@ import requests
 from joblib import Parallel, delayed
 from joblib_util import tqdm_joblib
 from retrying import retry
-from target_symbols import target_symbols
 
 S_URL_V1 = "https://api.binance.com/sapi/v1"
 
 # API keys
-api_key = "sJriTvzGE95Q8BBGsrdf1nUWfsEtA1xYWjRwircrkx1i4xCZxXHIQ8h2jwOrdo1K"
-secret_key = "ByzV0nQyKuHWSMFzi22JmAk9BTu3hMFySF9DIjNhbVGZs2zsECBzx6nyv1Py8DxY"
+api_key = "5tDfvj4KZNsz0D3mDKlB94cTLQlrbDKug8oFcuspYGOWjk4ifLVlQXqWhFWBqkVW"
+secret_key = "YtXCLeLw8DZvsAAjnoh3aqfM7mYJMVESqNZK83WqBz778JhKNTvmCJF1EeT2PWq2"
 
 # Utility functions from Binance sample
 # https://github.com/binance/binance-public-data/tree/master/Futures_Order_Book_Download
@@ -58,6 +59,12 @@ def get(path, params):
     header = {"X-MBX-APIKEY": api_key}
     resultGetFunction = requests.get(url, headers=header, timeout=30, verify=True)
     return resultGetFunction
+
+def prepare_datadir(datadir: str, symbol: str, target: str) -> pathlib.Path:
+        _datadir_path: pathlib.Path = pathlib.Path(f"{datadir}/{target}/{symbol}/")
+        if ~_datadir_path.is_dir():
+            _datadir_path.mkdir(parents=True, exist_ok=True)
+        return _datadir_path
 
 # 指定されたファイル名をもとに、.zipをダウンロードしてデータフレームを作り、pkl.gzとして保存する関数
 @retry(stop_max_attempt_number = 5, wait_fixed = 1000)
@@ -115,6 +122,7 @@ def download_orderbook_zip(symbol: str = None, startdate: datetime.datetime = No
             break
 
     _url = _r.json()["link"]
+    print(f"{_url} をダウンロードします")
     _r = requests.get(_url)
     if _r.status_code != requests.codes.ok:
         print(f'response.get({_url})からHTTPステータスコード {_r.status_code} が返されました。このファイルをスキップします。')
@@ -126,31 +134,21 @@ def download_orderbook_zip(symbol: str = None, startdate: datetime.datetime = No
     _fileobj = BytesIO(_r.content)
     try:
         # Process downloaded tar.gz file
-        with tarfile.open(fileobj = _fileobj, mode = "r:gz") as _tarfile:
+        with tarfile.open(fileobj=_fileobj, mode="r:gz") as _tarfile:
             _filenames = _tarfile.getnames()
             print(_filenames)
 
             # Process .tar.gz files in downloaded tar.gz file
             for _filename in _filenames:
-                _stem = Path(_filename).stem
-                _orderbook_fileobj = _tarfile.extractfile(_filename)
-                with tarfile.open(fileobj = _orderbook_fileobj, mode = "r:gz") as _orderbook_tarfile:
-                    _orderbook_filenames = _orderbook_tarfile.getnames()
+                _buffer: io.BufferedReader = _tarfile.extractfile(_filename)
 
-                    for _orderbook_filename in _orderbook_filenames:
-                        _stem = Path(_orderbook_filename).stem
-                        _orderbook_df = pl.read_csv(BytesIO(_orderbook_tarfile.extractfile(_orderbook_filename).read()),
-                            skip_rows = 1,
-                            new_columns = ["symbol", "timestamp", "first_update_id", "last_update_id", "side", "update_type", "price", "qty", "pu"],
-                            dtypes = {"symbol": str, "timestamp": int, "first_update_id": int, "last_update_id": int, "side": str, "price": float, "qty": float, "pu": float})
+                _datadir = prepare_datadir("data", symbol, "orderbook")
+                _targz_path = _datadir / _filename
 
-                        if not os.path.exists(f"{datadir}/orderbooks/{symbol}"):
-                            os.makedirs(f"{datadir}/orderbooks/{symbol}")
-                        _orderbook_df.write_parquet(f"{datadir}/orderbooks/{symbol}/{_stem}.parquet")
-                        print(f"{datadir}/orderbooks/{symbol}/{_stem}.parquetを保存しました")
+                with open(_targz_path, "wb") as _f:
+                    _f.write(_buffer.read())
+                print(f"{_targz_path} を保存しました")
 
-                        del(_orderbook_df)
-                        gc.collect()
     except Exception as e:
         print(e)
         raise e
@@ -189,4 +187,4 @@ if __name__ == '__main__':
     if symbol:
         download_orderbook_from_binance([symbol], startdate, enddate)
     else:
-        download_orderbook_from_binance(list(target_symbols.keys()), startdate, enddate)
+        download_orderbook_from_binance(["BTCUSDT"], startdate, enddate)

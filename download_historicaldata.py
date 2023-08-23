@@ -7,7 +7,7 @@ import zipfile
 from io import BytesIO
 from typing import List
 
-import pandas as pd
+import polars as pl
 import requests
 import xmltodict
 from joblib import Parallel, delayed
@@ -26,7 +26,14 @@ class BinanceHistoricalDataManager:
                 "time",
                 "is_buyer_maker"
             ],
-            "dtype": {0: int, 1: float, 2: float, 3: float, 4: int, 5: bool}
+            "dtypes": {
+                "id": pl.UInt64,
+                "price": pl.Float64,
+                "qty": pl.Float64,
+                "base_qty": pl.Float64,
+                "time": pl.UInt64,
+                "is_buyer_maker": pl.Boolean
+            }
         },
         "bookTicker": {
             "columns": [
@@ -38,16 +45,25 @@ class BinanceHistoricalDataManager:
                 "transaction_time",
                 "event_time"
             ],
-            "dtype": {0: int, 1: float, 2: float, 3: float, 4: float, 5: int, 6: int}
+            "dtypes": {
+                "update_id": pl.UInt64,
+                "best_bid_price": pl.Float64,
+                "best_bid_qty": pl.Float64,
+                "best_ask_price": pl.Float64,
+                "best_ask_qty": pl.Float64,
+                "transaction_time": pl.UInt64,
+                "event_time": pl.UInt64
+            }
         },
     }
 
-    def __init__(self, symbols: List[str]=["BTCUSDT"], targets: List[str] = ["trades", "bookTicker"], datadir: str = "data"):
+    def __init__(self, symbols: List[str]=["BTCUSDT", "ETHUSDT"], targets: List[str] = ["trades"], datadir: str = "data"):
         # ダウンロード対象とするシンボルリスト
         self.symbols: List[str] = symbols
 
         # ダウンロード対象とするヒストリカルデータの種類のリスト
-        # aggTrades, bookDepth, bookTicker, indexPriceKlines, klines, liquidationSnapshot, markpriceKlines, metrics, premiumIndexKlines, tradesのいずれか
+        # aggTrades, bookDepth, bookTicker, indexPriceKlines, klines, liquidationSnapshot,
+        # markpriceKlines, metrics, premiumIndexKlines, tradesのいずれか
         self.targets: List[str] = targets
 
         # データディレクトリ名
@@ -102,15 +118,15 @@ class BinanceHistoricalDataManager:
         Returns:
             List[str]: ダウンロード済みのzipファイルのリスト
         """
-        _datadir_path = self.preapare_datadir(symbol, target)
+        _datadir_path = self.prepare_datadir(symbol, target)
 
         _target_pattern = f"{symbol}-{target}-*"
         _result_list = [_ for _ in _datadir_path.glob(_target_pattern)]
 
         _list_downloaded_zipfiles = []
         for _f in _result_list:
-            _finename = _f.name
-            _list_downloaded_zipfiles.append(_finename.replace(".parquet", ".zip"))
+            _filename = _f.name
+            _list_downloaded_zipfiles.append(_filename.replace(".parquet", ".zip"))
 
         return sorted(_list_downloaded_zipfiles)
 
@@ -143,7 +159,7 @@ class BinanceHistoricalDataManager:
         _symbol = _m.group(1)
         _target = _m.group(2)
         _stem = pathlib.Path(target_zipfile).stem
-        _datadir_path = self.preapare_datadir(_symbol, _target)
+        _datadir_path = self.prepare_datadir(_symbol, _target)
 
         _url = f"https://data.binance.vision/data/futures/um/daily/{_target}/{_symbol}/{target_zipfile}"
 
@@ -156,31 +172,11 @@ class BinanceHistoricalDataManager:
             time.sleep(1)
             return
 
-        # メモリ内のデータをzipファイルとして処理し、CSVデータを読み込む
-        _csvzip = zipfile.ZipFile(BytesIO(_r.content))
-        if _csvzip.testzip() != None:
-            print(f"Corrupt zip file from {_url}. Retry.")
-            raise zipfile.BadZipFile
-        _csvraw = _csvzip.read(f"{_stem}.csv")
-
-        if chr(_csvraw[0]) == BinanceHistoricalDataManager.columns[_target]["columns"][0][0]:
-            # ヘッダーラインがあるので削除しないといけない (Binanceのデータはヘッダラインがあるものと無いものが混在している)
-            _header = 0
-        else:
-            _header = None
-
-        _df = pd.read_csv(
-            BytesIO(_csvraw),
-            names=BinanceHistoricalDataManager.columns[_target]["columns"],
-            dtype=BinanceHistoricalDataManager.columns[_target]["dtype"],
-            header=_header,
-        )
-
-        _tempfile_path = _datadir_path / f"TEMP_{_stem}.parquet"
-        _datafile_path = _datadir_path / f"{_stem}.parquet"
-        _df.to_parquet(_tempfile_path)
-        _tempfile_path.rename(_datafile_path)
-
+        _tempfile_path = _datadir_path / f"TEMP_{target_zipfile}"
+        _datafile_path = _datadir_path / target_zipfile
+        with open(_tempfile_path, "wb") as _f:
+            _f.write(_r.content)
+            _tempfile_path.rename(_datafile_path)
         return
 
     def download_historicaldata(self) -> None:
@@ -193,7 +189,7 @@ class BinanceHistoricalDataManager:
         for _symbol in self.symbols:
             for _target in self.targets:
                 # データディレクトリを準備する
-                _datadir_path = self.preapare_datadir(_symbol, _target)
+                _datadir_path = self.prepare_datadir(_symbol, _target)
 
                 # 処理開始前に全ての未完了ファイルを削除する
                 self.remove_incomplete_files(_datadir_path)
@@ -213,7 +209,7 @@ class BinanceHistoricalDataManager:
                 # 処理開始後にも全ての未完了ファイルを削除する
                 self.remove_incomplete_files(_datadir_path)
 
-    def preapare_datadir(self, symbol: str, target: str) -> pathlib.Path:
+    def prepare_datadir(self, symbol: str, target: str) -> pathlib.Path:
         _datadir_path: pathlib.Path = pathlib.Path(f"{self.datadir}/{target}/{symbol}/")
         if ~_datadir_path.is_dir():
             _datadir_path.mkdir(parents=True, exist_ok=True)
@@ -236,5 +232,5 @@ if __name__ == "__main__":
     parser.add_argument("--symbol", help="ダウンロードする対象の銘柄 例:BTCUSDT")
     args = parser.parse_args()
 
-    _binance_historicaldatamanager = BinanceHistoricalDataManager(symbols=["BTCUSDT", "ETHUSDT", "XRPUSDT"], targets=["trades", "bookTicker"], datadir="data")
+    _binance_historicaldatamanager = BinanceHistoricalDataManager(symbols=["BTCUSDT"], targets=["trades"], datadir="data")
     _binance_historicaldatamanager.download_historicaldata()
